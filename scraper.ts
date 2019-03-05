@@ -22,6 +22,10 @@ const CommentUrl = "mailto:roxby@roxbycouncil.com.au";
 
 declare const process: any;
 
+// Two points that are less than the tolerance apart will be considered the same point.
+
+const Tolerance = 3;
+
 // Address information.
 
 let StreetNames = null;
@@ -34,7 +38,7 @@ async function initializeDatabase() {
     return new Promise((resolve, reject) => {
         let database = new sqlite3.Database("data.sqlite");
         database.serialize(() => {
-            database.run("create table if not exists [data] ([council_reference] text primary key, [address] text, [description] text, [info_url] text, [comment_url] text, [date_scraped] text, [date_received] text, [legal_description] text)");
+            database.run("create table if not exists [data] ([council_reference] text primary key, [address] text, [description] text, [info_url] text, [comment_url] text, [date_scraped] text, [date_received] text)");
             resolve(database);
         });
     });
@@ -44,7 +48,7 @@ async function initializeDatabase() {
 
 async function insertRow(database, developmentApplication) {
     return new Promise((resolve, reject) => {
-        let sqlStatement = database.prepare("insert or ignore into [data] values (?, ?, ?, ?, ?, ?, ?, ?)");
+        let sqlStatement = database.prepare("insert or ignore into [data] values (?, ?, ?, ?, ?, ?, ?)");
         sqlStatement.run([
             developmentApplication.applicationNumber,
             developmentApplication.address,
@@ -52,22 +56,28 @@ async function insertRow(database, developmentApplication) {
             developmentApplication.informationUrl,
             developmentApplication.commentUrl,
             developmentApplication.scrapeDate,
-            developmentApplication.receivedDate,
-            developmentApplication.legalDescription
+            developmentApplication.receivedDate
         ], function(error, row) {
             if (error) {
                 console.error(error);
                 reject(error);
             } else {
                 if (this.changes > 0)
-                    console.log(`    Inserted: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\", legal description \"${developmentApplication.legalDescription}\" and received date \"${developmentApplication.receivedDate}\" into the database.`);
+                    console.log(`    Inserted: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\" and received date \"${developmentApplication.receivedDate}\" into the database.`);
                 else
-                    console.log(`    Skipped: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\", legal description \"${developmentApplication.legalDescription}\" and received date \"${developmentApplication.receivedDate}\" because it was already present in the database.`);
+                    console.log(`    Skipped: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\" and received date \"${developmentApplication.receivedDate}\" because it was already present in the database.`);
                 sqlStatement.finalize();  // releases any locks
                 resolve(row);
             }
         });
     });
+}
+
+// A 2D point.
+
+interface Point {
+    x: number,
+    y: number
 }
 
 // A bounding rectangle.
@@ -298,42 +308,59 @@ async function parseCells(page) {
     // outside of the grid (such as a logo).  Otherwise these short lines would cause problems due
     // to the additional cells that they would cause to be constructed later.
 
-    let horizontalLines: Rectangle[] = [];
-    let verticalLines: Rectangle[] = [];
+    let points: Point[] = [];
 
     for (let line of lines) {
-        if (line.height <= 2 && line.width >= 200) {
-            // Identify a horizontal line (these typically extend across the width of the page).
+        let startPoint: Point = undefined;
+        let endPoint: Point = undefined;
 
-            horizontalLines.push(line);
-        } else if (line.width <= 2 && line.height >= 10) {
+        if (line.height <= Tolerance && line.width >= 10) {
+            // Identify a horizontal line.  Extract its start and end points.
+
+            startPoint = { x: line.x, y: line.y };
+            endPoint = { x: line.x + line.width, y: line.y };
+        } else if (line.width <= Tolerance && line.height >= 10) {
             // Identify a vertical line (note that these might not be very tall if there are not
-            // many development applications in the grid).
+            // many development applications in the grid).  Extract its start and end points.
 
-            verticalLines.push(line);
+            startPoint = { x: line.x, y: line.y };
+            endPoint = { x: line.x, y: line.y + line.height };
+        }
+
+        // Record the points for later processing.
+
+        if (endPoint !== undefined && startPoint !== undefined) {
+            if (!points.some(point => (startPoint.x - point.x) ** 2 + (startPoint.y - point.y) ** 2 < Tolerance ** 2))
+                points.push(startPoint);
+            if (!points.some(point => (endPoint.x - point.x) ** 2 + (endPoint.y - point.y) ** 2 < Tolerance ** 2))
+                points.push(endPoint);    
         }
     }
 
-    let verticalLineComparer = (a, b) => (a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0);
-    verticalLines.sort(verticalLineComparer);
-
-    let horizontalLineComparer = (a, b) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : 0);
-    horizontalLines.sort(horizontalLineComparer);
-    
-    // Construct cells based on the grid of lines.
+    // Construct cells based on the grid of points.
 
     let cells: Cell[] = [];
+    for (let point of points) {
+        // Find the next closest point in the X direction (moving across horizontally with
+        // approximately the same Y co-ordinate).
 
-    for (let horizontalLineIndex = 0; horizontalLineIndex < horizontalLines.length - 1; horizontalLineIndex++) {
-        for (let verticalLineIndex = 0; verticalLineIndex < verticalLines.length - 1; verticalLineIndex++) {
-            let horizontalLine = horizontalLines[horizontalLineIndex];
-            let nextHorizontalLine = horizontalLines[horizontalLineIndex + 1];
-            let verticalLine = verticalLines[verticalLineIndex];
-            let nextVerticalLine = verticalLines[verticalLineIndex + 1];
-            cells.push({ elements: [], x: verticalLine.x, y: horizontalLine.y, width: nextVerticalLine.x - verticalLine.x, height: nextHorizontalLine.y - horizontalLine.y });
-        }
+        let closestRightPoint = points.reduce(((previous, current) => (Math.abs(current.y - point.y) < Tolerance && current.x > point.x && (previous === undefined || (current.x - point.x < previous.x - point.x))) ? current : previous), undefined);
+
+        // Find the next closest point in the Y direction (moving down vertically with
+        // approximately the same X co-ordinate).
+
+        let closestDownPoint = points.reduce(((previous, current) => (Math.abs(current.x - point.x) < Tolerance && current.y > point.y && (previous === undefined || (current.y - point.y < previous.y - point.y))) ? current : previous), undefined);
+
+        // Construct a rectangle from the discovered points.
+
+        if (closestRightPoint !== undefined && closestDownPoint !== undefined)
+            cells.push({ elements: [], x: point.x, y: point.y, width: closestRightPoint.x - point.x, height: closestDownPoint.y - point.y });
     }
 
+    // Sort the cells by approximate Y co-ordinate and then by X co-ordinate.
+
+    let cellComparer = (a, b) => (Math.abs(a.y - b.y) < Tolerance) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
+    cells.sort(cellComparer);
     return cells;
 }
 
@@ -404,12 +431,12 @@ async function parsePdf(url: string) {
 
         // Sort the cells by approximate Y co-ordinate and then by X co-ordinate.
 
-        let cellComparer = (a, b) => (Math.abs(a.y - b.y) < 2) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
+        let cellComparer = (a, b) => (Math.abs(a.y - b.y) < Tolerance) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
         cells.sort(cellComparer);
 
         // Sort the text elements by approximate Y co-ordinate and then by X co-ordinate.
 
-        let elementComparer = (a, b) => (Math.abs(a.y - b.y) < 1) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
+        let elementComparer = (a, b) => (Math.abs(a.y - b.y) < Tolerance) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
         elements.sort(elementComparer);
 
         // Allocate each element to an "owning" cell.
@@ -424,7 +451,7 @@ async function parsePdf(url: string) {
 
         let rows: Cell[][] = [];
         for (let cell of cells) {
-            let row = rows.find(row => Math.abs(row[0].y - cell.y) < 2);  // approximate Y co-ordinate match
+            let row = rows.find(row => Math.abs(row[0].y - cell.y) < Tolerance);  // approximate Y co-ordinate match
             if (row === undefined)
                 rows.push([ cell ]);  // start a new row
             else
@@ -452,28 +479,20 @@ async function parsePdf(url: string) {
 
         // Find the heading cells.
 
-        let applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "d/anumber"));
-        let receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "received"));
-        let legalDescriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "allotmentor"));
-        let streetNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "streetname"));
-        let suburbNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "town"));
-        let descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "proposal"));
+        let applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "app"));
+        let receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "lodged"));
+        let addressHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "siteaddress"));
+        let descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "description"));
 
         if (applicationNumberHeadingCell === undefined) {
             let elementSummary = elements.map(element => `[${element.text}]`).join("");
-            console.log(`No development applications can be parsed from the current page because the "D/A Number" column heading was not found.  Elements: ${elementSummary}`);
+            console.log(`No development applications can be parsed from the current page because the "App Number" column heading was not found.  Elements: ${elementSummary}`);
             continue;
         }
 
-        if (streetNameHeadingCell === undefined) {
+        if (addressHeadingCell === undefined) {
             let elementSummary = elements.map(element => `[${element.text}]`).join("");
-            console.log(`No development applications can be parsed from the current page because the "Street Name" column heading was not found.  Elements: ${elementSummary}`);
-            continue;
-        }
-
-        if (suburbNameHeadingCell === undefined) {
-            let elementSummary = elements.map(element => `[${element.text}]`).join("");
-            console.log(`No development applications can be parsed from the current page because the "Town" column heading was not found.  Elements: ${elementSummary}`);
+            console.log(`No development applications can be parsed from the current page because the "Site Address" column heading was not found.  Elements: ${elementSummary}`);
             continue;
         }
 
@@ -483,9 +502,7 @@ async function parsePdf(url: string) {
         for (let row of rows) {
             let applicationNumberCell = row.find(cell => getHorizontalOverlapPercentage(cell, applicationNumberHeadingCell) > 90);
             let receivedDateCell = row.find(cell => getHorizontalOverlapPercentage(cell, receivedDateHeadingCell) > 90);
-            let legalDescriptionCell = row.find(cell => getHorizontalOverlapPercentage(cell, legalDescriptionHeadingCell) > 90);
-            let streetNameCell = row.find(cell => getHorizontalOverlapPercentage(cell, streetNameHeadingCell) > 90);
-            let suburbNameCell = row.find(cell => getHorizontalOverlapPercentage(cell, suburbNameHeadingCell) > 90);
+            let addressCell = row.find(cell => getHorizontalOverlapPercentage(cell, addressHeadingCell) > 90);
             let descriptionCell = row.find(cell => getHorizontalOverlapPercentage(cell, descriptionHeadingCell) > 90);
 
             // Construct the application number.
@@ -493,32 +510,25 @@ async function parsePdf(url: string) {
             if (applicationNumberCell === undefined)
                 continue;
             let applicationNumber = applicationNumberCell.elements.map(element => element.text).join("").trim();
-            if (!/[0-9]+\/[0-9]+\/[0-9]+/.test(applicationNumber))  // an application number must be present, for example, "910/144/16"
+            if (!/[0-9]+\/[0-9]+\/[0-9]+/.test(applicationNumber))  // an application number must be present, for example, "690/006/15"
                 continue;
             console.log(`Found development application ${applicationNumber}.`);
 
             // Construct the address.
 
-            if (streetNameCell === undefined) {
-                console.log("Ignoring the development application because it has no street name cell.");
-                continue;
-            } else if (suburbNameCell === undefined) {
-                console.log("Ignoring the development application because it has no suburb name cell.");
-                continue;
-            }
-            
-            let streetName = streetNameCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-            let suburbName = suburbNameCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            if (streetName === "") {
-                console.log("Ignoring the development application because it has no street name.");
-                continue;
-            } else if (suburbName === "") {
-                console.log("Ignoring the development application because it has no suburb name.");
+            if (addressCell === undefined) {
+                console.log("Ignoring the development application because it has no address cell.");
                 continue;
             }
 
-            let address = formatAddress(streetName + ", " + suburbName);
+            let address = addressCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+
+            if (address === "") {
+                console.log("Ignoring the development application because it has no address.");
+                continue;
+            } 
+
+            address = formatAddress(address);
             if (address === "") {  // an address must be present
                 console.log("Ignoring the development application because the address is blank.");
                 continue;
@@ -536,12 +546,6 @@ async function parsePdf(url: string) {
             if (receivedDateCell !== undefined && receivedDateCell.elements.length > 0)
                 receivedDate = moment(receivedDateCell.elements[0].text.trim(), "D/MM/YYYY", true);
 
-            // Construct the legal description.
-
-            let legalDescription = "";
-            if (legalDescriptionCell !== undefined)
-                legalDescription = legalDescriptionCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
             developmentApplications.push({
                 applicationNumber: applicationNumber,
                 address: address,
@@ -549,8 +553,7 @@ async function parsePdf(url: string) {
                 informationUrl: url,
                 commentUrl: CommentUrl,
                 scrapeDate: moment().format("YYYY-MM-DD"),
-                receivedDate: receivedDate.isValid() ? receivedDate.format("YYYY-MM-DD") : "",
-                legalDescription: legalDescription
+                receivedDate: receivedDate.isValid() ? receivedDate.format("YYYY-MM-DD") : ""
             });        
         }
     }
