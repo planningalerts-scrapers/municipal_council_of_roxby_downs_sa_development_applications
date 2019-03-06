@@ -6,8 +6,6 @@
   "main": "scraper.js",
   "dependencies": {
     "cheerio": "1.0.0-rc.2",
-    "didyoumean2": "2.0.2",
-    "fs": "0.0.1-security",
     "moment": "2.24.0",
     "path": "0.12.7",
     "pdfjs-dist": "2.0.943",

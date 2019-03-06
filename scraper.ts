@@ -6,18 +6,16 @@
 
 "use strict";
 
-import * as fs from "fs";
 import * as cheerio from "cheerio";
 import * as request from "request-promise-native";
 import * as sqlite3 from "sqlite3";
 import * as urlparser from "url";
 import * as moment from "moment";
 import * as pdfjs from "pdfjs-dist";
-import didYouMean, * as didyoumean from "didyoumean2";
 
 sqlite3.verbose();
 
-const DevelopmentApplicationsUrl = "https://www.roxbydowns.sa.gov.au/building%20&%20planning";
+const DevelopmentApplicationsSearchUrl = "https://www.roxbydowns.sa.gov.au/search?t=siteSearch&searchMode=results&searchCurrentSiteOnly=false&resultsPerPage=200&searchString=%22development%20register%22";
 const CommentUrl = "mailto:roxby@roxbycouncil.com.au";
 
 declare const process: any;
@@ -25,12 +23,6 @@ declare const process: any;
 // Two points that are less than the tolerance apart will be considered the same point.
 
 const Tolerance = 3;
-
-// Address information.
-
-let StreetNames = null;
-let StreetSuffixes  = null;
-let SuburbNames = null;
 
 // Sets up an sqlite database.
 
@@ -101,43 +93,6 @@ interface Cell extends Rectangle {
     elements: Element[]
 }
 
-// Reads all the address information into global objects.
-
-function readAddressInformation() {
-    // Read the street names.
-
-    StreetNames = {}
-    for (let line of fs.readFileSync("streetnames.txt").toString().replace(/\r/g, "").trim().split("\n")) {
-        let streetNameTokens = line.toUpperCase().split(",");
-        let streetName = streetNameTokens[0].trim();
-        let suburbName = streetNameTokens[1].trim();
-        (StreetNames[streetName] || (StreetNames[streetName] = [])).push(suburbName);  // several suburbs may exist for the same street name
-    }
-
-    // Read the street suffixes.
-
-    StreetSuffixes = {};
-    for (let line of fs.readFileSync("streetsuffixes.txt").toString().replace(/\r/g, "").trim().split("\n")) {
-        let streetSuffixTokens = line.toUpperCase().split(",");
-        StreetSuffixes[streetSuffixTokens[0].trim()] = streetSuffixTokens[1].trim();
-    }
-
-    // Read the suburb names.
-
-    SuburbNames = {};
-    for (let line of fs.readFileSync("suburbnames.txt").toString().replace(/\r/g, "").trim().split("\n")) {
-        let suburbTokens = line.toUpperCase().split(",");
-        
-        let suburbName = suburbTokens[0].trim();
-        SuburbNames[suburbName] = suburbTokens[1].trim();
-        if (suburbName.startsWith("MOUNT ")) {
-            SuburbNames["MT " + suburbName.substring("MOUNT ".length)] = suburbTokens[1].trim();
-            SuburbNames["MT." + suburbName.substring("MOUNT ".length)] = suburbTokens[1].trim();
-            SuburbNames["MT. " + suburbName.substring("MOUNT ".length)] = suburbTokens[1].trim();
-        }
-    }
-}
-
 // Constructs a rectangle based on the intersection of the two specified rectangles.
 
 function intersect(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
@@ -186,69 +141,6 @@ function getHorizontalOverlapPercentage(rectangle1: Rectangle, rectangle2: Recta
     let unionWidth = Math.max(endX1, endX2) - Math.min(startX1, startX2);
 
     return (intersectionWidth * 100) / unionWidth;
-}
-
-// Formats the text as a street.
-
-function formatStreetName(text: string) {
-    if (text === undefined)
-        return text;
-
-    let tokens = text.trim().toUpperCase().split(" ");
-
-    // Expand the street suffix (for example, this converts "ST" to "STREET").
-
-    let token = tokens.pop();
-    let streetSuffix = StreetSuffixes[token];
-    tokens.push((streetSuffix === undefined) ? token : streetSuffix);
-
-    // Extract tokens from the end of the array until a valid street name is encountered (this
-    // looks for an exact match).
-
-    for (let index = 6; index >= 2; index--)
-        if (StreetNames[tokens.slice(-index).join(" ")] !== undefined)
-            return tokens.join(" ");  // reconstruct the street with the leading house number (and any other prefix text)
-
-    // Extract tokens from the end of the array until a valid street name is encountered (this
-    // allows for a spelling error).
-
-    for (let index = 6; index >= 2; index--) {
-        let threshold = 7 - index;  // set the number of allowed spelling errors proportional to the number of words
-        let streetNameMatch = <string>didYouMean(tokens.slice(-index).join(" "), Object.keys(StreetNames), { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: threshold, trimSpaces: true });
-        if (streetNameMatch !== null) {
-            tokens.splice(-index, index);  // remove elements from the end of the array           
-            return (tokens.join(" ") + " " + streetNameMatch).trim();  // reconstruct the street with any other original prefix text
-        }
-    }
-
-    return text;
-}
-
-// Formats the address, ensuring that it has a valid suburb, state and post code.
-
-function formatAddress(address: string) {
-    // Allow for a few special cases (eg. road type suffixes).
-
-    address = address.trim().replace(/ TCE NTH/g, " TERRACE NORTH").replace(/ TCE STH/g, " TERRACE SOUTH").replace(/ TCE EAST/g, " TERRACE EAST").replace(/ TCE WEST/g, " TERRACE WEST");
-
-    // Break the address up based on commas (the main components of the address are almost always
-    // separated by commas).
-
-    let commaIndex = address.lastIndexOf(",");
-    if (commaIndex < 0)
-        return address;
-    let streetName = address.substring(0, commaIndex);
-    let suburbName = address.substring(commaIndex + 1);
-
-    // Add the state and post code to the suburb name.
-
-    suburbName = <string>didYouMean(suburbName, Object.keys(SuburbNames), { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 2, trimSpaces: true });
-    if (suburbName === null)
-        return address;
-
-    // Reconstruct the full address using the formatted street name and determined suburb name.
-
-    return formatStreetName(streetName) + ", " + SuburbNames[suburbName];
 }
 
 // Examines all the lines in a page of a PDF and constructs cells (ie. rectangles) based on those
@@ -406,6 +298,11 @@ async function parsePdf(url: string) {
 
     // Parse the PDF.  Each page has the details of multiple applications.
 
+    let applicationNumberHeadingCell: Cell = undefined;
+    let receivedDateHeadingCell: Cell = undefined;
+    let addressHeadingCell: Cell = undefined;
+    let descriptionHeadingCell: Cell = undefined;
+
     let pdf = await pdfjs.getDocument({ data: buffer, disableFontFace: true, ignoreErrors: true });
     for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex++) {
         console.log(`Reading and parsing applications from page ${pageIndex + 1} of ${pdf.numPages}.`);
@@ -479,10 +376,14 @@ async function parsePdf(url: string) {
 
         // Find the heading cells.
 
-        let applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "app"));
-        let receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "lodged"));
-        let addressHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "siteaddress"));
-        let descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "description"));
+        if (applicationNumberHeadingCell === undefined) {
+            applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "app"));
+            receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "lodged"));
+            addressHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "siteaddress"));
+            descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "description"));
+            if (descriptionHeadingCell === undefined)
+                descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "developmentdescription"));
+        }
 
         if (applicationNumberHeadingCell === undefined) {
             let elementSummary = elements.map(element => `[${element.text}]`).join("");
@@ -521,14 +422,13 @@ async function parsePdf(url: string) {
                 continue;
             }
 
-            let address = addressCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+            let address = addressCell.elements.map(element => element.text).join("").replace(/\s\s+/g, " ").trim();
 
             if (address === "") {
                 console.log("Ignoring the development application because it has no address.");
                 continue;
             } 
 
-            address = formatAddress(address);
             if (address === "") {  // an address must be present
                 console.log("Ignoring the development application because the address is blank.");
                 continue;
@@ -538,13 +438,13 @@ async function parsePdf(url: string) {
 
             let description = "";
             if (descriptionCell !== undefined)
-                description = descriptionCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+                description = descriptionCell.elements.map(element => element.text).join("").replace(/\s\s+/g, " ").trim();
 
             // Construct the received date.
 
             let receivedDate = moment.invalid();
             if (receivedDateCell !== undefined && receivedDateCell.elements.length > 0)
-                receivedDate = moment(receivedDateCell.elements[0].text.trim(), "D/MM/YYYY", true);
+                receivedDate = moment(receivedDateCell.elements.map(element => element.text).join("").replace(/\s\s+/g, " ").trim(), "D MMMM YYYY", true);
 
             developmentApplications.push({
                 applicationNumber: applicationNumber,
@@ -580,60 +480,73 @@ async function main() {
 
     let database = await initializeDatabase();
 
-    // Read all street, street suffix and suburb information.
+    // Search for pages containing development application PDFs.
 
-    readAddressInformation();
+    console.log(`Retrieving page: ${DevelopmentApplicationsSearchUrl}`);
 
-    // Read the main page of development applications.
-
-    console.log(`Retrieving page: ${DevelopmentApplicationsUrl}`);
-
-    let body = await request({ url: DevelopmentApplicationsUrl, rejectUnauthorized: false, proxy: process.env.MORPH_PROXY });
+    let body = await request({ url: DevelopmentApplicationsSearchUrl, rejectUnauthorized: false, proxy: process.env.MORPH_PROXY });
     await sleep(2000 + getRandom(0, 5) * 1000);
     let $ = cheerio.load(body);
-    
-    let pdfUrls: string[] = [];
-    for (let element of $("div.unityHtmlArticle p a").get()) {
-        let pdfUrl = new urlparser.URL(element.attribs.href, DevelopmentApplicationsUrl).href;
-        if (pdfUrl.toLowerCase().includes("register") && pdfUrl.toLowerCase().includes(".pdf"))
-            if (!pdfUrls.some(url => url === pdfUrl))  // avoid duplicates
-                pdfUrls.push(pdfUrl);
+
+    let pdfPageUrls: string[] = [];
+    for (let element of $("p.noLeading a.uGoToLink").get()) {
+        let pdfPageUrl = new urlparser.URL(element.attribs.href, DevelopmentApplicationsSearchUrl).href;
+        if (!pdfPageUrl.toLowerCase().includes(".pdf"))
+            if (!pdfPageUrls.some(url => url === pdfPageUrl))  // avoid duplicates
+                pdfPageUrls.push(pdfPageUrl);
     }
 
-    // Always parse the most recent PDF file and randomly select one other PDF file to parse.
+    // Randomly select two pages that contain developmnet application PDFs (avoid processing all
+    // PDFs at once because this may use too much memory, resulting in morph.io terminating the
+    // current process).
 
-    if (pdfUrls.length === 0) {
-        console.log("No PDF URLs were found on the page.");
+    let selectedPdfPageUrls: string[] = [];
+    if (pdfPageUrls.length > 0) {
+        selectedPdfPageUrls.push(...pdfPageUrls.splice(getRandom(0, pdfPageUrls.length), 1));
+        selectedPdfPageUrls.push(...pdfPageUrls.splice(getRandom(0, pdfPageUrls.length), 1));
+    }
+
+    if (selectedPdfPageUrls.length === 0) {
+        console.log("No PDF URLs were found.");
         return;
     }
 
-    console.log(`Found ${pdfUrls.length} PDF file(s).  Selecting two to parse.`);
+    // Read the page containing development applications.
 
-    // Select the most recent PDF.  And randomly select one other PDF (avoid processing all PDFs
-    // at once because this may use too much memory, resulting in morph.io terminating the current
-    // process).
+    for (let selectedPdfPageUrl of selectedPdfPageUrls) {
+        console.log(`Retrieving page: ${selectedPdfPageUrl}`);
 
-    let selectedPdfUrls: string[] = [];
-    selectedPdfUrls.push(pdfUrls.pop());
-    if (pdfUrls.length > 0)
-        selectedPdfUrls.push(pdfUrls[getRandom(0, pdfUrls.length)]);
-    if (getRandom(0, 2) === 0)
-        selectedPdfUrls.reverse();
+        // Find any PDFs on the page.
 
-    for (let pdfUrl of selectedPdfUrls) {
-        console.log(`Parsing document: ${pdfUrl}`);
-        let developmentApplications = await parsePdf(pdfUrl);
-        console.log(`Parsed ${developmentApplications.length} development ${(developmentApplications.length == 1) ? "application" : "applications"} from document: ${pdfUrl}`);
-        
-        // Attempt to avoid reaching 512 MB memory usage (this will otherwise result in the
-        // current process being terminated by morph.io).
+        let body = await request({ url: selectedPdfPageUrl, rejectUnauthorized: false, proxy: process.env.MORPH_PROXY });
+        await sleep(2000 + getRandom(0, 5) * 1000);
+        let $ = cheerio.load(body);
+    
+        let pdfUrls: string[] = [];
+        for (let element of $("div.uFileItem p a").get()) {
+            let pdfUrl = new urlparser.URL(element.attribs.href, selectedPdfPageUrl).href;
+            if (pdfUrl.toLowerCase().includes(".pdf"))
+                if (!pdfUrls.some(url => url === pdfUrl))  // avoid duplicates
+                    pdfUrls.push(pdfUrl);
+        }
 
-        if (global.gc)
-            global.gc();
+        // Parse the PDFs that were found (there will typically only be one).
 
-        console.log("Inserting development applications into the database.");
-        for (let developmentApplication of developmentApplications)
-            await insertRow(database, developmentApplication);
+        for (let pdfUrl of pdfUrls) {
+            console.log(`Parsing document: ${pdfUrl}`);
+            let developmentApplications = await parsePdf(pdfUrl);
+            console.log(`Parsed ${developmentApplications.length} development ${(developmentApplications.length == 1) ? "application" : "applications"} from document: ${pdfUrl}`);
+            
+            // Attempt to avoid reaching 512 MB memory usage (this will otherwise result in the
+            // current process being terminated by morph.io).
+    
+            if (global.gc)
+                global.gc();
+    
+            console.log("Inserting development applications into the database.");
+            for (let developmentApplication of developmentApplications)
+                await insertRow(database, developmentApplication);
+        }
     }
 }
 
