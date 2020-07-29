@@ -15,7 +15,7 @@ import * as pdfjs from "pdfjs-dist";
 
 sqlite3.verbose();
 
-const DevelopmentApplicationsSearchUrl = "https://www.roxbydowns.sa.gov.au/search?t=siteSearch&searchMode=results&searchCurrentSiteOnly=false&resultsPerPage=200&searchString=%22development%20register%22";
+const DevelopmentApplicationsSearchUrl = "https://www.roxbydowns.sa.gov.au/search?collection=roxby-downs-council-meta&query=%22development+register%22&start_rank=1&num_ranks=200";
 const CommentUrl = "mailto:roxby@roxbycouncil.com.au";
 
 declare const process: any;
@@ -40,7 +40,7 @@ async function initializeDatabase() {
 
 async function insertRow(database, developmentApplication) {
     return new Promise((resolve, reject) => {
-        let sqlStatement = database.prepare("insert or ignore into [data] values (?, ?, ?, ?, ?, ?, ?)");
+        let sqlStatement = database.prepare("insert or replace into [data] values (?, ?, ?, ?, ?, ?, ?)");
         sqlStatement.run([
             developmentApplication.applicationNumber,
             developmentApplication.address,
@@ -54,10 +54,7 @@ async function insertRow(database, developmentApplication) {
                 console.error(error);
                 reject(error);
             } else {
-                if (this.changes > 0)
-                    console.log(`    Inserted: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\" and received date \"${developmentApplication.receivedDate}\" into the database.`);
-                else
-                    console.log(`    Skipped: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\" and received date \"${developmentApplication.receivedDate}\" because it was already present in the database.`);
+                console.log(`    Saved application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\" and received date \"${developmentApplication.receivedDate}\" to the database.`);
                 sqlStatement.finalize();  // releases any locks
                 resolve(row);
             }
@@ -523,7 +520,7 @@ async function main() {
         let $ = cheerio.load(body);
     
         let pdfUrls: string[] = [];
-        for (let element of $("div.uFileItem p a").get()) {
+        for (let element of $("li.result-item a").get()) {
             let pdfUrl = new urlparser.URL(element.attribs.href, selectedPdfPageUrl).href;
             if (pdfUrl.toLowerCase().includes(".pdf"))
                 if (!pdfUrls.some(url => url === pdfUrl))  // avoid duplicates
